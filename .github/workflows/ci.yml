@@ -1,4 +1,4 @@
-# Commit -> checks -> image (tagged with the commit SHA) -> deploy test on kind -> approved publish to GHCR.
+# Commit -> checks -> one multi-arch image tagged with the commit SHA -> scan + deploy test on kind -> approved promotion to :stable.
 name: ci
 on:
   pull_request:
@@ -9,6 +9,8 @@ permissions: { contents: read }
 concurrency: { group: "ci-${{ github.ref }}", cancel-in-progress: true }
 env:
   IMAGE: ghcr.io/om-midya/notes-devops
+  # On PRs github.sha is a temporary merge commit; tag images with the real branch commit instead.
+  SHA: ${{ github.event.pull_request.head.sha || github.sha }}
 
 jobs:
   test:
@@ -45,53 +47,55 @@ jobs:
 
   build-and-deploy-test:
     needs: [test, security]
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
+    permissions: { contents: read, packages: write }
     steps:
       - uses: actions/checkout@v5
-      - name: Build image tagged with the commit SHA
+        with: { ref: "${{ env.SHA }}" }
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with: { registry: ghcr.io, username: "${{ github.actor }}", password: "${{ secrets.GITHUB_TOKEN }}" }
+      - name: Build once (amd64 + arm64), tag with the commit SHA, push
         run: |
-          docker build -t "$IMAGE:$GITHUB_SHA" --build-arg APP_VERSION="$GITHUB_SHA" \
+          docker buildx build --platform linux/amd64,linux/arm64 --push -t "$IMAGE:$SHA" \
+            --build-arg APP_VERSION="$SHA" \
             --label org.opencontainers.image.source="https://github.com/$GITHUB_REPOSITORY" \
-            --label org.opencontainers.image.revision="$GITHUB_SHA" .
+            --label org.opencontainers.image.revision="$SHA" \
+            --cache-from type=gha --cache-to type=gha,mode=max .
       - name: Image vulnerability gate
-        run: docker run --rm -v /var/run/docker.sock:/var/run/docker.sock anchore/grype:v0.100.0 "$IMAGE:$GITHUB_SHA" --only-fixed --fail-on high
+        run: docker run --rm anchore/grype:v0.100.0 "registry:$IMAGE:$SHA" --only-fixed --fail-on high
       - uses: azure/setup-helm@v4
         with: { version: v4.3.1 }
       - uses: helm/kind-action@v1
         with: { cluster_name: notes, config: kind-config.yaml }
-      - name: Deploy chart exactly as deploy.sh does (restricted PSA, generated secret)
+      - name: Deploy the pushed image exactly as deploy.sh does (restricted PSA, generated secret)
         run: |
-          kind load docker-image "$IMAGE:$GITHUB_SHA" --name notes
           kubectl create namespace notes
           kubectl label namespace notes pod-security.kubernetes.io/enforce=restricted
           kubectl -n notes create secret generic notes-db --from-literal=password="$(openssl rand -hex 24)"
-          helm lint chart/notes --set image.tag="$GITHUB_SHA"
-          helm install notes chart/notes -n notes --set image.tag="$GITHUB_SHA" --set autoscaling.enabled=false --wait --timeout 4m
+          helm lint chart/notes --set image.tag="$SHA"
+          helm install notes chart/notes -n notes --set image.tag="$SHA" --set autoscaling.enabled=false --wait --timeout 4m
       - name: User journey smoke test + version check
         run: |
           helm test notes -n notes --logs
-          test "$(curl -fsS localhost:8080/version)" = "{\"version\":\"$GITHUB_SHA\"}"
+          test "$(curl -fsS localhost:8080/version)" = "{\"version\":\"$SHA\"}"
+          echo "Built, scanned and deploy-tested \`$IMAGE:$SHA\`" >> "$GITHUB_STEP_SUMMARY"
       - name: Debug on failure
         if: failure()
         run: kubectl -n notes get all,events; kubectl -n notes logs -l app.kubernetes.io/part-of=notes --all-containers --tail=50
-      - name: Save tested image
-        run: docker save "$IMAGE:$GITHUB_SHA" | gzip > image.tar.gz
-      - uses: actions/upload-artifact@v4
-        with: { name: image, path: image.tar.gz, retention-days: 3 }
 
-  publish:
+  release:
     needs: build-and-deploy-test
-    # Publishing is the release step: it pauses for manual approval on the "release" environment.
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    # Manual approval on the "release" environment, then promote the tested digest to :stable (no rebuild).
     environment: release
     runs-on: ubuntu-latest
     permissions: { contents: read, packages: write }
     steps:
-      - uses: actions/download-artifact@v4
-        with: { name: image }
-      - name: Push the exact image that passed the deploy test
-        run: |
-          gunzip -c image.tar.gz | docker load
-          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-          docker push "$IMAGE:$GITHUB_SHA"
-          echo "Published $IMAGE:$GITHUB_SHA. Deploy locally with: ./deploy.sh $GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with: { registry: ghcr.io, username: "${{ github.actor }}", password: "${{ secrets.GITHUB_TOKEN }}" }
+      - run: |
+          docker buildx imagetools create -t "$IMAGE:stable" "$IMAGE:$SHA"
+          echo "Released \`$IMAGE:$SHA\` as :stable. Deploy: \`./deploy.sh $SHA\`" >> "$GITHUB_STEP_SUMMARY"
