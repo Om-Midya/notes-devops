@@ -19,7 +19,7 @@ spec:
       rules:
         - record: notes:error_ratio:rate5m
           expr: |
-            sum(rate(http_requests_total{namespace="{{ .Release.Namespace }}",route=~"/api/.*|/|/notes",status=~"5.."}[5m]))
+            (sum(rate(http_requests_total{namespace="{{ .Release.Namespace }}",route=~"/api/.*|/|/notes",status=~"5.."}[5m])) or vector(0))
             / clamp_min(sum(rate(http_requests_total{namespace="{{ .Release.Namespace }}",route=~"/api/.*|/|/notes"}[5m])), 1e-9)
         - alert: NotesHighErrorRate
           expr: notes:error_ratio:rate5m > 0.01
