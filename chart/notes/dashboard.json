@@ -138,7 +138,7 @@
    "targets": [
     {
      "refId": "A",
-     "expr": "sum(up{namespace=\"notes\",service=\"notes-app\"})",
+     "expr": "sum(kube_deployment_status_replicas_available{namespace=\"notes\",deployment=\"notes-app\"})",
      "legendFormat": ""
     }
    ]

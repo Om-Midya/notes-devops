@@ -36,11 +36,12 @@ spec:
             summary: "Notes p95 latency above 300ms"
             runbook: docs/RUNBOOK.md#noteshighlatency
         - alert: NotesNoReadyPods
-          expr: sum(up{namespace="{{ .Release.Namespace }}",service="{{ .Release.Name }}-app"}) == 0 or absent(up{namespace="{{ .Release.Namespace }}",service="{{ .Release.Name }}-app"})
+          # Ready pods, not scrape success: unready pods are still scraped but get no user traffic.
+          expr: (sum(kube_deployment_status_replicas_available{namespace="{{ .Release.Namespace }}",deployment="{{ .Release.Name }}-app"}) or vector(0)) == 0
           for: 1m
           labels: { severity: critical }
           annotations:
-            summary: "No Notes app pod is scrapeable"
+            summary: "No Notes app pod is ready; users cannot reach the app"
             runbook: docs/RUNBOOK.md#notesnoreadypods
 ---
 apiVersion: v1

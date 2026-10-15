@@ -30,7 +30,7 @@ More than 1% of user requests return 5xx for 2 minutes.
 
 ### NotesNoReadyPods
 
-Prometheus cannot scrape any app pod for 1 minute. Users get connection errors.
+No app pod is ready for 1 minute. Users get connection errors.
 
 1. `k get pods`. If app pods are `Running` but `0/1` ready, readiness fails, which usually means Postgres is down.
 2. `k get pod notes-postgres-0` and `k logs notes-postgres-0`. If the pod is gone, make sure that the StatefulSet has `replicas: 1` (`k get sts`). If the PVC is full, `k exec notes-postgres-0 -- df -h /var/lib/postgresql/data`.

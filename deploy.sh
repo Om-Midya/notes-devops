@@ -35,16 +35,17 @@ EOF
 # 4. DB secret generated on first deploy; it lives only in the cluster, never in git.
 $K -n $NS get secret notes-db >/dev/null 2>&1 || $K -n $NS create secret generic notes-db --from-literal=password="$(openssl rand -hex 24)"
 
-# 5. Image tagged with the full commit SHA. Prefer the CI-built image; otherwise build that commit locally.
-if docker pull -q "$REPO:$SHA" 2>/dev/null; then
+# 5. Image tagged with the full commit SHA. Prefer the CI-built image (the node pulls it from public GHCR);
+#    otherwise build that commit locally and load it into the node.
+if docker manifest inspect "$REPO:$SHA" >/dev/null 2>&1; then
   echo "using CI image $REPO:$SHA"
 else
   echo "CI image not found, building $SHA locally"
   git diff --quiet HEAD || { echo "working tree is dirty: commit first so the image matches $SHA" >&2; exit 1; }
   [ "$SHA" = "$(git rev-parse HEAD)" ] || { echo "local build only works for HEAD; check out $SHA first" >&2; exit 1; }
   docker build -t "$REPO:$SHA" --build-arg APP_VERSION="$SHA" .
+  kind load docker-image "$REPO:$SHA" --name notes
 fi
-kind load docker-image "$REPO:$SHA" --name notes
 
 # 6. Rolling release. If pods do not become ready in time, Helm rolls back to the last good revision.
 $H upgrade --install notes chart/notes -n $NS --set image.tag="$SHA" --set monitoring.enabled=true \
