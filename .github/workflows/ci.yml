@@ -22,8 +22,8 @@ jobs:
         ports: ["5432:5432"]
         options: --health-cmd pg_isready --health-interval 3s --health-retries 20
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with: { python-version: "3.13", cache: pip }
       - run: pip install -r requirements.txt pytest==9.1.1 ruff==0.17.1 pip-audit==2.9.0
       - name: Lint (includes bandit security rules)
@@ -37,7 +37,7 @@ jobs:
   security:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with: { fetch-depth: 0 }
       # Scanners run from pinned images, not marketplace actions (trivy-action tags were hijacked in 2026).
       - name: Secret scan (full history)
@@ -49,26 +49,30 @@ jobs:
     needs: [test, security]
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
+    # Same-repo branches only: fork PRs never get this job's package-write token.
     permissions: { contents: read, packages: write }
+    outputs: { digest: "${{ steps.build.outputs.digest }}" }
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with: { ref: "${{ env.SHA }}" }
-      - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with: { registry: ghcr.io, username: "${{ github.actor }}", password: "${{ secrets.GITHUB_TOKEN }}" }
       - name: Build once (amd64 + arm64), tag with the commit SHA, push
+        id: build
         run: |
-          docker buildx build --platform linux/amd64,linux/arm64 --push -t "$IMAGE:$SHA" \
+          docker buildx build --platform linux/amd64,linux/arm64 --push -t "$IMAGE:$SHA" --metadata-file meta.json \
             --build-arg APP_VERSION="$SHA" \
             --label org.opencontainers.image.source="https://github.com/$GITHUB_REPOSITORY" \
             --label org.opencontainers.image.revision="$SHA" \
             --cache-from type=gha --cache-to type=gha,mode=max .
+          echo "digest=$(jq -r '."containerimage.digest"' meta.json)" >> "$GITHUB_OUTPUT"
       - name: Image vulnerability gate
-        run: docker run --rm anchore/grype:v0.100.0 "registry:$IMAGE:$SHA" --only-fixed --fail-on high
-      - uses: azure/setup-helm@v4
+        run: docker run --rm anchore/grype:v0.100.0 "registry:$IMAGE@${{ steps.build.outputs.digest }}" --only-fixed --fail-on high
+      - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
         with: { version: v4.3.1 }
-      - uses: helm/kind-action@v1
+      - uses: helm/kind-action@1544676c07bb3570fcb70166beaa07c4528fd4aa # v1.15.1
         with: { cluster_name: notes, config: kind-config.yaml }
       - name: Deploy the pushed image exactly as deploy.sh does (restricted PSA, generated secret)
         run: |
@@ -76,12 +80,12 @@ jobs:
           kubectl label namespace notes pod-security.kubernetes.io/enforce=restricted
           kubectl -n notes create secret generic notes-db --from-literal=password="$(openssl rand -hex 24)"
           helm lint chart/notes --set image.tag="$SHA"
-          helm install notes chart/notes -n notes --set image.tag="$SHA" --set autoscaling.enabled=false --wait --timeout 4m
+          helm install notes chart/notes -n notes --set image.tag="$SHA" --set image.digest="${{ steps.build.outputs.digest }}" --set autoscaling.enabled=false --wait --timeout 4m
       - name: User journey smoke test + version check
         run: |
           helm test notes -n notes --logs
           test "$(curl -fsS localhost:8080/version)" = "{\"version\":\"$SHA\"}"
-          echo "Built, scanned and deploy-tested \`$IMAGE:$SHA\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "Built, scanned and deploy-tested \`$IMAGE:$SHA\` (\`${{ steps.build.outputs.digest }}\`)" >> "$GITHUB_STEP_SUMMARY"
       - name: Debug on failure
         if: failure()
         run: kubectl -n notes get all,events; kubectl -n notes logs -l app.kubernetes.io/part-of=notes --all-containers --tail=50
@@ -93,9 +97,10 @@ jobs:
     runs-on: ubuntu-latest
     permissions: { contents: read, packages: write }
     steps:
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with: { registry: ghcr.io, username: "${{ github.actor }}", password: "${{ secrets.GITHUB_TOKEN }}" }
       - run: |
-          docker buildx imagetools create -t "$IMAGE:stable" "$IMAGE:$SHA"
+          # Promote the digest that was tested, so a re-pushed tag cannot slip in between test and release.
+          docker buildx imagetools create -t "$IMAGE:stable" "$IMAGE@${{ needs.build-and-deploy-test.outputs.digest }}"
           echo "Released \`$IMAGE:$SHA\` as :stable. Deploy: \`./deploy.sh $SHA\`" >> "$GITHUB_STEP_SUMMARY"
