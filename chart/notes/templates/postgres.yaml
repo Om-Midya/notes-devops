@@ -1,0 +1,67 @@
+# Single-replica StatefulSet: stable identity + its own PVC. No HA; see docs/DECISIONS.md.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-postgres
+  labels: {{- include "notes.labels" . | nindent 4 }}
+spec:
+  clusterIP: None
+  selector: { app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/name: postgres }
+  ports: [{ name: pg, port: 5432 }]
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ .Release.Name }}-postgres
+  labels: {{- include "notes.labels" . | nindent 4 }}
+    app.kubernetes.io/name: postgres
+spec:
+  serviceName: {{ .Release.Name }}-postgres
+  replicas: 1
+  selector:
+    matchLabels: { app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/name: postgres }
+  template:
+    metadata:
+      labels:
+        {{- include "notes.labels" . | nindent 8 }}
+        app.kubernetes.io/name: postgres
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 70        # "postgres" user in the alpine image
+        fsGroup: 70
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: postgres
+          image: {{ .Values.db.image }}
+          env:
+            - { name: POSTGRES_USER, value: notes }
+            - { name: POSTGRES_DB, value: notes }
+            - { name: PGDATA, value: /var/lib/postgresql/data/pgdata }
+            - name: POSTGRES_PASSWORD
+              valueFrom: { secretKeyRef: { name: {{ .Values.db.existingSecret }}, key: password } }
+          ports: [{ name: pg, containerPort: 5432 }]
+          readinessProbe:
+            exec: { command: [pg_isready, -U, notes, -d, notes] }
+            periodSeconds: 5
+          livenessProbe:
+            exec: { command: [pg_isready, -U, notes, -d, notes] }
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { memory: 512Mi }
+          securityContext: {{- include "notes.securityContext" . | nindent 12 }}
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/postgresql/data }
+            - { name: run, mountPath: /var/run/postgresql }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - { name: run, emptyDir: {} }
+        - { name: tmp, emptyDir: {} }
+  volumeClaimTemplates:
+    - metadata: { name: data }
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources: { requests: { storage: {{ .Values.db.storage }} } }

@@ -1,0 +1,16 @@
+# kube-prometheus-stack trimmed for a laptop.
+prometheus:
+  prometheusSpec:
+    # Discover ServiceMonitors/PrometheusRules from every release, not only this one.
+    serviceMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+    retention: 2d
+    resources: { requests: { memory: 400Mi } }
+grafana:
+  adminPassword: ""   # chart generates one into the monitoring-grafana secret
+  sidecar:
+    dashboards: { enabled: true, searchNamespace: ALL }
+kubeEtcd: { enabled: false }
+kubeControllerManager: { enabled: false }
+kubeScheduler: { enabled: false }
+kubeProxy: { enabled: false }

@@ -1,0 +1,101 @@
+{{- $tag := required "image.tag is required (use the git commit SHA)" .Values.image.tag }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ .Release.Name }}-app
+  labels: {{- include "notes.labels" . | nindent 4 }}
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-app
+  labels:
+    {{- include "notes.labels" . | nindent 4 }}
+    app.kubernetes.io/name: notes-app
+    app.kubernetes.io/version: {{ $tag | quote }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicas }}
+  {{- end }}
+  revisionHistoryLimit: 5
+  strategy:
+    rollingUpdate: { maxSurge: 1, maxUnavailable: 0 }
+  selector:
+    matchLabels: { app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/name: notes-app }
+  template:
+    metadata:
+      labels:
+        {{- include "notes.labels" . | nindent 8 }}
+        app.kubernetes.io/name: notes-app
+        app.kubernetes.io/version: {{ $tag | quote }}
+    spec:
+      serviceAccountName: {{ .Release.Name }}-app
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: app
+          image: "{{ .Values.image.repository }}:{{ $tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports: [{ name: http, containerPort: 8080 }]
+          env:
+            - name: DB_PASSWORD
+              valueFrom: { secretKeyRef: { name: {{ .Values.db.existingSecret }}, key: password } }
+            - name: DATABASE_URL
+              value: "postgresql://notes:$(DB_PASSWORD)@{{ .Release.Name }}-postgres:5432/notes"
+            {{- if .Values.tracing.enabled }}
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://{{ .Release.Name }}-jaeger:4318"
+            {{- end }}
+          # Liveness checks only the process (a DB outage must not restart the app); readiness checks Postgres.
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet: { path: /readyz, port: http }
+            periodSeconds: 5
+            failureThreshold: 2
+          lifecycle:
+            preStop: { sleep: { seconds: 5 } }   # let the Service drop the pod before SIGTERM
+          resources: {{- toYaml .Values.resources | nindent 12 }}
+          securityContext: {{- include "notes.securityContext" . | nindent 12 }}
+          volumeMounts: [{ name: tmp, mountPath: /tmp }]
+      volumes: [{ name: tmp, emptyDir: {} }]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-app
+  labels: {{- include "notes.labels" . | nindent 4 }}
+    app.kubernetes.io/name: notes-app
+spec:
+  type: NodePort
+  selector: { app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/name: notes-app }
+  ports: [{ name: http, port: 80, targetPort: http, nodePort: {{ .Values.nodePort }} }]
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ .Release.Name }}-app
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: { app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/name: notes-app }
+{{- if .Values.autoscaling.enabled }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ .Release.Name }}-app
+spec:
+  scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: {{ .Release.Name }}-app }
+  minReplicas: {{ .Values.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource: { name: cpu, target: { type: Utilization, averageUtilization: {{ .Values.autoscaling.cpuPercent }} } }
+{{- end }}
