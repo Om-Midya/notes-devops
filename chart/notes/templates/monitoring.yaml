@@ -1,0 +1,55 @@
+{{- if .Values.monitoring.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ .Release.Name }}-app
+spec:
+  selector:
+    matchLabels: { app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/name: notes-app }
+  endpoints: [{ port: http, path: /metrics, interval: 15s }]
+---
+# SLO: 99% of API requests succeed (non-5xx) and p95 latency < 300ms. Runbook: docs/RUNBOOK.md
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ .Release.Name }}-slo
+spec:
+  groups:
+    - name: notes-slo
+      rules:
+        - record: notes:error_ratio:rate5m
+          expr: |
+            (sum(rate(http_requests_total{namespace="{{ .Release.Namespace }}",route=~"/api/.*|/|/notes",status=~"5.."}[5m])) or vector(0))
+            / clamp_min(sum(rate(http_requests_total{namespace="{{ .Release.Namespace }}",route=~"/api/.*|/|/notes"}[5m])), 1e-9)
+        - alert: NotesHighErrorRate
+          expr: notes:error_ratio:rate5m > 0.01
+          for: 2m
+          labels: { severity: critical }
+          annotations:
+            summary: "Notes 5xx ratio {{`{{ $value | humanizePercentage }}`}} is above the 1% SLO"
+            runbook: docs/RUNBOOK.md#noteshigherrorrate
+        - alert: NotesHighLatency
+          expr: histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket{namespace="{{ .Release.Namespace }}"}[5m]))) > 0.3
+          for: 5m
+          labels: { severity: warning }
+          annotations:
+            summary: "Notes p95 latency above 300ms"
+            runbook: docs/RUNBOOK.md#noteshighlatency
+        - alert: NotesNoReadyPods
+          # Ready pods, not scrape success: unready pods are still scraped but get no user traffic.
+          expr: (sum(kube_deployment_status_replicas_available{namespace="{{ .Release.Namespace }}",deployment="{{ .Release.Name }}-app"}) or vector(0)) == 0
+          for: 1m
+          labels: { severity: critical }
+          annotations:
+            summary: "No Notes app pod is ready; users cannot reach the app"
+            runbook: docs/RUNBOOK.md#notesnoreadypods
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-dashboard
+  labels: { grafana_dashboard: "1" }   # picked up by the Grafana sidecar
+data:
+  notes.json: |-
+{{ .Files.Get "dashboard.json" | indent 4 }}
+{{- end }}

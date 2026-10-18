@@ -1,0 +1,44 @@
+# Lets the test pod reach the app through the default-deny policy.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-smoke
+  annotations: { "helm.sh/hook": test, "helm.sh/hook-weight": "-1", "helm.sh/hook-delete-policy": before-hook-creation }
+spec:
+  podSelector:
+    matchLabels: { app.kubernetes.io/name: notes-smoke }
+  policyTypes: [Egress]
+  egress:
+    - to: [{ podSelector: { matchLabels: { app.kubernetes.io/name: notes-app } } }]
+      ports: [{ port: 8080 }]
+    - ports: [{ port: 53, protocol: UDP }, { port: 53, protocol: TCP }]
+---
+# `helm test`: a real user journey through the Service (create, read back, version check).
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ .Release.Name }}-smoke
+  labels: { app.kubernetes.io/name: notes-smoke }
+  annotations: { "helm.sh/hook": test, "helm.sh/hook-delete-policy": before-hook-creation }
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  securityContext: { runAsNonRoot: true, runAsUser: 10001, seccompProfile: { type: RuntimeDefault } }
+  containers:
+    - name: smoke
+      image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+      command:
+        - python
+        - -c
+        - |
+          import json, urllib.request as u
+          base = "http://{{ .Release.Name }}-app"
+          req = u.Request(base + "/api/notes", json.dumps({"body": "smoke"}).encode(), {"Content-Type": "application/json"})
+          nid = json.load(u.urlopen(req))["id"]
+          assert any(n["id"] == nid for n in json.load(u.urlopen(base + "/api/notes")))
+          v = json.load(u.urlopen(base + "/version"))["version"]
+          assert v == "{{ .Values.image.tag }}", v
+          u.urlopen(u.Request(f"{base}/api/notes/{nid}", method="DELETE"))
+          print("smoke ok, version", v)
+      resources: { limits: { memory: 64Mi } }
+      securityContext: {{- include "notes.securityContext" . | nindent 8 }}

@@ -1,0 +1,9 @@
+# Local cluster: one node, app NodePort 30080 published on localhost:8080.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: notes
+nodes:
+  - role: control-plane
+    extraPortMappings:
+      - containerPort: 30080
+        hostPort: 8080

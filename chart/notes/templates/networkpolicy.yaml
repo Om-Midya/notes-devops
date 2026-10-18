@@ -1,0 +1,50 @@
+# Default deny, then allow only the paths the app needs.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-default-deny
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-app
+spec:
+  podSelector:
+    matchLabels: { app.kubernetes.io/name: notes-app }
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - ports: [{ port: 8080 }]   # users (NodePort) and Prometheus scrapes
+  egress:
+    - to: [{ podSelector: { matchLabels: { app.kubernetes.io/name: postgres } } }]
+      ports: [{ port: 5432 }]
+    - to: [{ podSelector: { matchLabels: { app.kubernetes.io/name: jaeger } } }]
+      ports: [{ port: 4318 }]
+    - ports: [{ port: 53, protocol: UDP }, { port: 53, protocol: TCP }]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-postgres
+spec:
+  podSelector:
+    matchLabels: { app.kubernetes.io/name: postgres }
+  policyTypes: [Ingress]
+  ingress:
+    - from: [{ podSelector: { matchLabels: { app.kubernetes.io/name: notes-app } } }]
+      ports: [{ port: 5432 }]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-jaeger
+spec:
+  podSelector:
+    matchLabels: { app.kubernetes.io/name: jaeger }
+  policyTypes: [Ingress]
+  ingress:
+    - from: [{ podSelector: { matchLabels: { app.kubernetes.io/name: notes-app } } }]
+      ports: [{ port: 4318 }]
+    - ports: [{ port: 16686 }]   # UI via kubectl port-forward

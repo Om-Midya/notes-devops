@@ -1,0 +1,25 @@
+image:
+  repository: ghcr.io/om-midya/notes-devops
+  tag: ""          # required: the git commit SHA the image was built from
+  digest: ""       # optional: pin the exact image bytes (CI sets it)
+  pullPolicy: IfNotPresent
+
+replicas: 2
+autoscaling: { enabled: true, minReplicas: 2, maxReplicas: 5, cpuPercent: 70 }
+resources:
+  requests: { cpu: 50m, memory: 128Mi }
+  limits: { cpu: 500m, memory: 256Mi }
+nodePort: 30080
+
+db:
+  existingSecret: notes-db   # created by deploy.sh, key "password"; never stored in git
+  storage: 1Gi
+  image: postgres:17-alpine
+
+tracing:
+  enabled: true
+  image: jaegertracing/jaeger:2.10.0
+
+# Needs the kube-prometheus-stack CRDs (ServiceMonitor, PrometheusRule).
+monitoring:
+  enabled: false
